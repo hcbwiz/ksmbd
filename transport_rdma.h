@@ -7,7 +7,7 @@
 #ifndef __KSMBD_TRANSPORT_RDMA_H__
 #define __KSMBD_TRANSPORT_RDMA_H__
 
-#define SMB_DIRECT_PORT	5445
+#define SMB_DIRECT_PORT	445
 
 /* SMB DIRECT negotiation request packet [MS-SMBD] 2.2.1 */
 struct smb_direct_negotiate_req {
@@ -50,14 +50,14 @@ struct smb_direct_data_transfer {
 	__u8 buffer[];
 } __packed;
 
-#ifdef CONFIG_SMB_SERVER_SMBDIRECT
+//#ifdef CONFIG_SMB_SERVER_SMBDIRECT
 int ksmbd_rdma_init(void);
 int ksmbd_rdma_destroy(void);
 bool ksmbd_rdma_capable_netdev(struct net_device *netdev);
-#else
+/*#else
 static inline int ksmbd_rdma_init(void) { return 0; }
 static inline int ksmbd_rdma_destroy(void) { return 0; }
 static inline bool ksmbd_rdma_capable_netdev(struct net_device *netdev) { return false; }
-#endif
+#endif*/
 
 #endif /* __KSMBD_TRANSPORT_RDMA_H__ */
