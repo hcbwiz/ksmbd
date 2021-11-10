@@ -122,6 +122,7 @@ struct ksmbd_conn_ops {
 struct ksmbd_transport_ops {
 	int (*prepare)(struct ksmbd_transport *t);
 	void (*disconnect)(struct ksmbd_transport *t);
+	void (*async_disconnect)(struct ksmbd_transport *t);
 	int (*read)(struct ksmbd_transport *t, char *buf, unsigned int size);
 	int (*writev)(struct ksmbd_transport *t, struct kvec *iovs, int niov,
 		      int size, bool need_invalidate_rkey,

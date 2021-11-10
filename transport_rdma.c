@@ -549,6 +549,11 @@ static void recv_done(struct ib_cq *cq, struct ib_wc *wc)
 		    ib_wc_status_msg(wc->status), wc->status,
 		    wc->opcode);
 
+	if (unlikely(!smb_direct_wq)) {
+		put_empty_recvmsg(t, recvmsg);
+		return;
+	}
+
 	ib_dma_sync_single_for_cpu(wc->qp->device, recvmsg->sge.addr,
 				   recvmsg->sge.length, DMA_FROM_DEVICE);
 
@@ -1426,6 +1431,15 @@ static void smb_direct_disconnect(struct ksmbd_transport *t)
 	free_transport(st);
 }
 
+static void smb_direct_async_disconnect(struct ksmbd_transport *t)
+{
+	struct smb_direct_transport *st = smb_trans_direct_transfort(t);
+
+	ksmbd_debug(RDMA, "Async Disconnecting cm_id=%p\n", st->cm_id);
+
+	smb_direct_disconnect_rdma_work(&st->disconnect_work);
+}
+
 static int smb_direct_cm_handler(struct rdma_cm_id *cm_id,
 				 struct rdma_cm_event *event)
 {
@@ -2080,6 +2094,7 @@ bool ksmbd_rdma_capable_netdev(struct net_device *netdev)
 static struct ksmbd_transport_ops ksmbd_smb_direct_transport_ops = {
 	.prepare	= smb_direct_prepare,
 	.disconnect	= smb_direct_disconnect,
+	.async_disconnect = smb_direct_async_disconnect,
 	.writev		= smb_direct_writev,
 	.read		= smb_direct_read,
 	.rdma_read	= smb_direct_rdma_read,
