@@ -35,8 +35,6 @@
 #include "smbstatus.h"
 #include "transport_rdma.h"
 
-#define SMB_DIRECT_PORT	5445
-
 #define SMB_DIRECT_VERSION_LE		cpu_to_le16(0x0100)
 
 /* SMB_DIRECT negotiation timeout in seconds */
@@ -55,6 +53,11 @@
 #define SMB_DIRECT_CM_RETRY			6
 /* No need to retry on Receiver Not Ready since SMB_DIRECT manages credits */
 #define SMB_DIRECT_CM_RNR_RETRY		0
+
+int smbd_rdma = 0;
+module_param_named(rdma, smbd_rdma, int,
+                   S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(rdma, "RDMA support (default: 0)");
 
 /*
  * User configurable initial values per SMB_DIRECT transport connection
@@ -76,7 +79,7 @@ static int smb_direct_max_fragmented_recv_size = 1024 * 1024;
 /*  The maximum single-message size which can be received */
 static int smb_direct_max_receive_size = 8192;
 
-static int smb_direct_max_read_write_size = 1024 * 1024;
+static int smb_direct_max_read_write_size = 1048512;
 
 static int smb_direct_max_outstanding_rw_ops = 8;
 
@@ -416,6 +419,7 @@ static void free_transport(struct smb_direct_transport *t)
 
 	if (t->qp) {
 		ib_drain_qp(t->qp);
+		ib_mr_pool_destroy(t->qp, &t->qp->rdma_mrs);
 		ib_destroy_qp(t->qp);
 	}
 
@@ -652,7 +656,6 @@ static int smb_direct_read(struct ksmbd_transport *t, char *buf,
 
 again:
 	if (st->status != SMB_DIRECT_CS_CONNECTED) {
-		pr_err("disconnected\n");
 		return -ENOTCONN;
 	}
 
@@ -1619,8 +1622,8 @@ static int smb_direct_negotiate(struct smb_direct_transport *t)
 				 le32_to_cpu(req->preferred_send_size));
 	t->max_send_size = min_t(int, t->max_send_size,
 				 le32_to_cpu(req->max_receive_size));
-	t->max_fragmented_send_size =
-			le32_to_cpu(req->max_fragmented_size);
+	t->max_fragmented_recv_size = (t->recv_credit_max * t->max_recv_size) / 2;
+	t->max_fragmented_send_size = le32_to_cpu(req->max_fragmented_size);
 
 	ret = smb_direct_send_negotiate_response(t, ret);
 out:
@@ -1709,7 +1712,7 @@ static int smb_direct_init_params(struct smb_direct_transport *t,
 	cap->max_send_sge = SMB_DIRECT_MAX_SEND_SGES;
 	cap->max_recv_sge = SMB_DIRECT_MAX_RECV_SGES;
 	cap->max_inline_data = 0;
-	cap->max_rdma_ctxs = 0;
+	cap->max_rdma_ctxs = smb_direct_max_outstanding_rw_ops;
 	return 0;
 }
 
@@ -1791,6 +1794,7 @@ static int smb_direct_create_qpair(struct smb_direct_transport *t,
 {
 	int ret;
 	struct ib_qp_init_attr qp_attr;
+	int pages_per_rw, pages_per_mr, mr_count;
 
 	t->pd = ib_alloc_pd(t->cm_id->device, 0);
 	if (IS_ERR(t->pd)) {
@@ -1837,6 +1841,21 @@ static int smb_direct_create_qpair(struct smb_direct_transport *t,
 
 	t->qp = t->cm_id->qp;
 	t->cm_id->event_handler = smb_direct_cm_handler;
+
+	pages_per_rw = DIV_ROUND_UP(t->max_rdma_rw_size, PAGE_SIZE) + 2;
+	if (pages_per_rw > t->cm_id->device->attrs.max_sgl_rd) {
+		pages_per_mr = min_t(int, pages_per_rw,
+				t->cm_id->device->attrs.max_fast_reg_page_list_len);
+		mr_count = DIV_ROUND_UP(pages_per_rw, pages_per_mr) *
+			atomic_read(&t->rw_avail_ops);
+		ret = ib_mr_pool_init(t->qp, &t->qp->rdma_mrs, mr_count,
+				IB_MR_TYPE_MEM_REG, pages_per_mr, 0);
+		if (ret) {
+			pr_err("failed to init mr pool count %d pages %d\n",
+					mr_count, pages_per_mr);
+			goto err;
+		}
+	}
 
 	return 0;
 err:
@@ -1972,6 +1991,12 @@ static int smb_direct_listen(int port)
 		return PTR_ERR(cm_id);
 	}
 
+	ret = rdma_set_afonly(cm_id, 1);
+	if (ret) {
+		pr_err("Can't set_afonly: %d\n", ret);
+		goto err;
+	}
+
 	ret = rdma_bind_addr(cm_id, (struct sockaddr *)&sin);
 	if (ret) {
 		pr_err("Can't bind: %d\n", ret);
@@ -2039,6 +2064,9 @@ bool ksmbd_rdma_capable_netdev(struct net_device *netdev)
 {
 	struct ib_device *ibdev;
 	bool rdma_capable = false;
+
+	if (!smbd_rdma)
+		return false;
 
 	ibdev = ib_device_get_by_netdev(netdev, RDMA_DRIVER_UNKNOWN);
 	if (ibdev) {
